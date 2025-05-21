@@ -54,6 +54,11 @@ pub fn build(b: *std.Build) void {
     if (build_examples) {
         // Build each example
         for (examples) |example_info| {
+            const exe_mod = b.createModule(.{
+                .root_source_file = b.path(example_info.path),
+                .target = target,
+                .optimize = optimize,
+            });
             const ex_step = buildExample(
                 b,
                 target,
@@ -61,7 +66,7 @@ pub fn build(b: *std.Build) void {
                 engDat.engine_lib,
                 engDat.engine_mod,
                 example_info.name,
-                example_info.path,
+                exe_mod,
                 example_info.assets,
             );
             // const install_exe = b.addInstallArtifact(exe, .{
@@ -95,11 +100,9 @@ fn buildEngine(
         if (target.result.os.tag != .emscripten) {
             const lib = b.addStaticLibrary(.{
                 .name = "engine",
-                .root_source_file = b.path("src/engine.zig"),
-                .target = target,
-                .optimize = optimize,
+                .root_module = engine_mod,
             });
-            _ = b.addInstallArtifact(lib, .{});
+            b.installArtifact(lib);
             break :blk lib;
         } else {
             const obj = b.addObject(.{
@@ -172,28 +175,52 @@ fn buildEngine(
     // addArchIncludes(b, target, optimize, lua_lib) catch unreachable;
     // engine_lib.linkLibrary(lua_lib);
 
-    if (target.result.os.tag != .emscripten) {
-        b.installArtifact(engine_lib);
-    }
-
     return .{ .engine_lib = engine_lib, .engine_mod = engine_mod };
 }
 
-pub fn buildExample(
+pub fn buildGame(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    engine_lib: *std.Build.Step.Compile,
+    engine_dep: *std.Build.Dependency,
     engine_mod: *std.Build.Module,
     name: []const u8,
-    root_src_file: []const u8,
+    exe_mod: *std.Build.Module,
     assets: []const []const u8,
 ) *std.Build.Step {
-    const exe_mod = b.createModule(.{
-        .root_source_file = b.path(root_src_file),
-        .target = target,
-        .optimize = optimize,
-    });
+    // Create the engine library
+    const engine_lib: ?*std.Build.Step.Compile = blk: {
+        if (target.result.os.tag != .emscripten) {
+            break :blk engine_dep.artifact("engine");
+        } else {
+            break :blk null;
+        }
+    };
+
+    return buildExample(
+        b,
+        target,
+        optimize,
+        engine_lib,
+        engine_mod,
+        name,
+        exe_mod,
+        assets,
+    );
+}
+
+// This one is internal since it uses the engine lib from our internal build step.
+fn buildExample(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    engine_lib: ?*std.Build.Step.Compile,
+    engine_mod: *std.Build.Module,
+    name: []const u8,
+    exe_mod: *std.Build.Module,
+    assets: []const []const u8,
+) *std.Build.Step {
+    _ = optimize;
 
     const exe = blk: {
         if (target.result.os.tag == .emscripten) {
@@ -255,7 +282,14 @@ pub fn buildExample(
             }
 
             emcc_command.addFileArg(exe.getEmittedBin());
-            emcc_command.addFileArg(engine_lib.getEmittedBin());
+            // emcc_command.addFileArg(engine_lib.getEmittedBin());
+
+            // We setup the engine in an emscripten build to output a `web/engine.o` to link against
+            const obj_path = engine_mod.owner.getInstallPath(
+                .prefix,
+                "web/engine.o",
+            );
+            emcc_command.addArg(obj_path);
 
             // const zgui = b.dependency("zgui", .{
             //     .target = target,
@@ -273,7 +307,7 @@ pub fn buildExample(
             return &emcc_command.step;
         },
         else => {
-            exe.linkLibrary(engine_lib);
+            exe.linkLibrary(engine_lib.?);
 
             const path = b.pathJoin(&.{ "bin", name });
 
